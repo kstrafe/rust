@@ -7,7 +7,7 @@ use syntax::source_map::Span;
 use rustc_target::spec::abi::Abi;
 
 use super::{
-    InterpResult, PointerArithmetic,
+    GlobalId, InterpResult, PointerArithmetic,
     InterpCx, Machine, OpTy, ImmTy, PlaceTy, MPlaceTy, StackPopCleanup, FnVal,
 };
 
@@ -291,6 +291,31 @@ impl<'mir, 'tcx, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     if normalize_abi(caller_abi) != normalize_abi(callee_abi) {
                         throw_unsup!(FunctionAbiMismatch(caller_abi, callee_abi))
                     }
+                }
+
+                // If this function is a const function then as an optimisation we can query this
+                // evaluation immediately.
+                //
+                // For the moment we only do this for functions which take no arguments
+                // (or all arguments are ZSTs) so that we don't memoize too much.
+                if self.tcx.is_const_fn_raw(instance.def.def_id()) &&
+                   args.iter().all(|a| a.layout.is_zst())
+                {
+                    let gid = GlobalId { instance, promoted: None };
+                    let place = self.const_eval_raw(gid)?;
+
+                    let dest = match dest {
+                        Some(dest) => dest,
+                        None => throw_ub!(Unreachable)
+                    };
+
+                    self.copy_op(place.into(), dest)?;
+
+                    // No stack frame gets pushed, the main loop will just act as if the
+                    // call completed.
+                    self.goto_block(ret)?;
+                    self.dump_place(*dest);
+                    return Ok(())
                 }
 
                 // We need MIR for this fn
